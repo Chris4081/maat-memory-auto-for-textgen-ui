@@ -45,7 +45,7 @@ The AI can now **create and store new memories on its own** and automatically in
 * Optional toggle to disallow AI-initiated saves (`allow_model_saves`).
 * All data is stored locally at  
   ```
-  user_data/maat_memauto/memories.json
+  user_data/extensions/maat_memauto/memories.json
   ```
 
 ---
