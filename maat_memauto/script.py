@@ -16,11 +16,33 @@
 import os, io, re, json, threading, html, hashlib, shutil
 from datetime import datetime
 import gradio as gr
-
+#--------------------------------------------------------------------------------
+# ── Multilingual trigger list for guide injection ──
+#--------------------------------------------------------------------------------
+GUIDE_TRIGGERS = [
+    # Deutsch
+    "merke", "merk dir", "kannst du dir das merken", "erinnere", "erinnere dich", "speichere",
+    "speicher das", "speichere das", "speicher es", "speichere es",
+    "kannst du dir", "kannst du dir merken", "bitte merken", "merken bitte",
+    # Englisch
+    "remember", "can you remember", "please remember", "save this", "store this", "memorize", "note this",
+    # Spanisch
+    "recuerda", "puedes recordar", "guarda esto", "almacena esto", "memoriza", "anota esto",
+    # Französisch
+    "souviens-toi", "peux-tu te souvenir", "enregistre ceci", "mémorise", "note ceci",
+    # Portugiesisch
+    "lembra-te", "podes lembrar", "salva isto", "guarda isto", "memoriza", "anota isto",
+    # Italienisch
+    "ricorda", "puoi ricordare", "salva questo", "memorizza", "annota questo",
+    # Polnisch
+    "zapamiętaj", "czy możesz zapamiętać", "zapisz to", "zanotuj to",
+    # Tschechisch
+    "zapamatuj si", "můžeš si zapamatovat", "ulož to", "poznamenej si to",
+]
 # ─────────────────────────────────────────────────────────────────────────────
 # Pfade & Konstanten
 # ─────────────────────────────────────────────────────────────────────────────
-BASE_DIR   = os.path.join("user_data", "maat_memauto")
+BASE_DIR = os.path.join("user_data", "extensions", "maat_memauto")
 MEM_PATH   = os.path.join(BASE_DIR, "memories.json")
 SCHEMA_VERSION = 1
 SUPPORTED_LANGS = ["en", "de", "es", "fr", "pt", "it", "pl", "cs"]
@@ -60,10 +82,6 @@ DEFAULTS = {
     "guide_once": True,         # 1x pro Session
     "guide_mode": "trigger",    # "trigger" | "always"
     "hint_on_triggers": True,
-    "guide_triggers": [
-        "merke", "merk dir", "erinnere", "speichere",
-        "remember", "store", "save this", "note this"
-    ],
     "guide_custom": { "de": "", "en": "" },
 
     # Modell darf per "save:" schreiben?
@@ -96,38 +114,68 @@ def _coerce_bool(v, default=False):
 
 def _sanitize(data: dict):
     out = dict(DEFAULTS)
-    if not isinstance(data, dict): return out
-    out["version"]     = int(data.get("version", SCHEMA_VERSION))
-    out["timecontext"] = _coerce_bool(data.get("timecontext", DEFAULTS["timecontext"]))
-    out["datecontext"] = _coerce_bool(data.get("datecontext", DEFAULTS["datecontext"]))
-    out["debug"]       = _coerce_bool(data.get("debug", DEFAULTS["debug"]))
-    out["ui_lang"]     = (data.get("ui_lang") or "en").lower()
+    if not isinstance(data, dict):
+        return out
 
-    for k in ("max_context_chars", "max_show_memories"):
-        try: out[k] = max(0, int(data.get(k, DEFAULTS[k])))
-        except Exception: out[k] = DEFAULTS[k]
+    # Basisflags
+    out["version"]     = int(data.get("version", SCHEMA_VERSION))
+    out["timecontext"] = _coerce_bool(data.get("timecontext", DEFAULTS.get("timecontext", True)))
+    out["datecontext"] = _coerce_bool(data.get("datecontext", DEFAULTS.get("datecontext", True)))
+    out["debug"]       = _coerce_bool(data.get("debug", DEFAULTS.get("debug", False)))
+    out["ui_lang"]     = (data.get("ui_lang") or DEFAULTS.get("ui_lang","en")).lower()
+
+    # Zahlenfelder
+    try:
+        out["max_context_chars"] = max(0, int(data.get("max_context_chars", DEFAULTS.get("max_context_chars", 1200))))
+    except Exception:
+        out["max_context_chars"] = DEFAULTS.get("max_context_chars", 1200)
+
+    try:
+        out["max_show_memories"] = max(1, int(data.get("max_show_memories", DEFAULTS.get("max_show_memories", 8))))
+    except Exception:
+        out["max_show_memories"] = DEFAULTS.get("max_show_memories", 8)
 
     # Guide-Felder
-    out["inject_guide"]   = _coerce_bool(data.get("inject_guide", DEFAULTS["inject_guide"]))
-    out["guide_lang"]     = (data.get("guide_lang") or DEFAULTS["guide_lang"]).lower()
-    out["guide_once"]     = _coerce_bool(data.get("guide_once", DEFAULTS["guide_once"]))
-    out["guide_mode"]     = (data.get("guide_mode") or DEFAULTS["guide_mode"]).lower()
-    out["hint_on_triggers"]= _coerce_bool(data.get("hint_on_triggers", DEFAULTS["hint_on_triggers"]))
-    out["guide_triggers"] = [w.strip() for w in (data.get("guide_triggers") or DEFAULTS["guide_triggers"]) if w.strip()]
-    out["guide_custom"]   = data.get("guide_custom") or {"de":"", "en":""}
+    out["inject_guide"]     = _coerce_bool(data.get("inject_guide", DEFAULTS.get("inject_guide", True)))
+    out["guide_lang"]       = (data.get("guide_lang") or DEFAULTS.get("guide_lang","en")).lower()
+    out["guide_once"]       = _coerce_bool(data.get("guide_once", DEFAULTS.get("guide_once", True)))
+    out["guide_mode"]       = (data.get("guide_mode") or DEFAULTS.get("guide_mode","trigger")).lower()
+    out["hint_on_triggers"] = _coerce_bool(data.get("hint_on_triggers", DEFAULTS.get("hint_on_triggers", True)))
 
-    out["allow_model_saves"] = _coerce_bool(data.get("allow_model_saves", DEFAULTS["allow_model_saves"]))
+    # guide_triggers: akzeptiere Liste ODER Komma-String
+    gt_raw = data.get("guide_triggers", DEFAULTS.get("guide_triggers", []))
+    if isinstance(gt_raw, str):
+        gt_list = [w.strip() for w in gt_raw.split(",") if w.strip()]
+    elif isinstance(gt_raw, list):
+        gt_list = [w.strip() for w in gt_raw if isinstance(w, str) and w.strip()]
+    else:
+        gt_list = []
+    out["guide_triggers"] = gt_list
 
-    # Pairs
+    # guide_custom: sicherstellen, dass alle Sprachen existieren
+    gc = data.get("guide_custom")
+    if not isinstance(gc, dict):
+        gc = {}
+    for lang in ["en", "de", "es", "fr", "pt", "it", "pl", "cs"]:
+        gc.setdefault(lang, "")
+    out["guide_custom"] = gc
+
+    # Model-Save-Toggle
+    out["allow_model_saves"] = _coerce_bool(data.get("allow_model_saves", DEFAULTS.get("allow_model_saves", True)))
+
+    # Pairs aufräumen & deduplizieren
     clean, seen = [], set()
     for p in (data.get("pairs") or []):
-        if not isinstance(p, dict): continue
+        if not isinstance(p, dict):
+            continue
         mem = str(p.get("memory","")).strip()
-        if not mem: continue
+        if not mem:
+            continue
         kws = str(p.get("keywords","")).strip()
         alw = _coerce_bool(p.get("always", False))
-        key = (mem, kws, alw)
-        if key in seen: continue
+        key = (mem.lower(), kws.lower(), bool(alw))
+        if key in seen:
+            continue
         seen.add(key)
         clean.append({
             "memory": mem,
@@ -147,6 +195,21 @@ def _load():
         except Exception:
             raw = {}
     _params.update(_sanitize(raw))
+
+    # ---------- Fallbacks für neue Keys ----------
+    # guide_triggers: wenn nicht vorhanden oder leer → Defaults einsetzen
+    _params.setdefault("guide_triggers", [])
+    if not _params["guide_triggers"]:
+        try:
+            _params["guide_triggers"] = GUIDE_TRIGGERS[:] 
+        except NameError:
+            _params["guide_triggers"] = []
+        _save()
+
+    _params.setdefault("guide_custom", {})
+    for lang in ["en", "de", "es", "fr", "pt", "it", "pl", "cs"]:
+        _params["guide_custom"].setdefault(lang, "")
+
     _debug("loaded:", {"pairs": len(_params["pairs"])})
 
 def _save():
@@ -594,15 +657,25 @@ def custom_generate_chat_prompt(user_input, state, **kwargs):
         if _params.get("inject_guide", True):
             mode = (_params.get("guide_mode") or "trigger").lower()
             inject_now = (mode == "always") or _has_trigger(user_input, _params.get("guide_triggers", []))
-            if inject_now and not (_params.get("guide_once", True) and _SESSION.get("guide_injected")):
-                guide_text = _get_guide_text(_params.get("guide_lang","en"))
-                ctx = (state.get("context","") or "")
-                if _GUIDE_MARKER not in ctx:
-                    state["context"] = f"{guide_text}\n\n{ctx}".strip()
-                    _SESSION["guide_injected"] = True
-                    _debug("Guide injected into hidden context")
+
+            if inject_now:
+                guide_text = _get_guide_text(_params.get("guide_lang", "en"))
+                ctx = (state.get("context", "") or "")
+
+                if _params.get("guide_once", True):
+                    # Einmal pro Session: nur injizieren, wenn noch nicht gesetzt
+                    if (_GUIDE_MARKER not in ctx) and (not _SESSION.get("guide_injected")):
+                        state["context"] = f"{guide_text}\n\n{ctx}".strip()
+                        _SESSION["guide_injected"] = True
+                        _debug("Guide injected into hidden context (once)")
+                else:
+                    # Jedes Mal: vorhandenen Guide-Block entfernen, dann frisch vorn einfügen
+                    pattern = rf"{re.escape(_GUIDE_MARKER)}.*?(?:\n\s*\n|$)"
+                    ctx_clean = re.sub(pattern, "", ctx, flags=re.DOTALL)
+                    state["context"] = f"{guide_text}\n\n{ctx_clean}".strip()
+                    _debug("Guide injected into hidden context (every turn)")
     except Exception as e:
-        _debug("Guide inject error:", e)
+        _debug("Guide inject error:", str(e))
 
     # Zeit/Datum + Memories in HIDDEN-Kontext
     lines = []
@@ -1065,6 +1138,10 @@ def _rows():
     return [[p.get("memory",""), p.get("keywords",""), bool(p.get("always"))]
             for p in _params.get("pairs", [])]
 
+def _U(**kw):
+    kw.setdefault("interactive", True)
+    return gr.update(**kw)
+
 def ui():
     _load()
     gr.Markdown(_t("title"))
@@ -1089,9 +1166,11 @@ def ui():
             with gr.Row():
                 cb_guide = gr.Checkbox(value=_params.get("inject_guide", True), label=_t("inject_guide"))
                 cb_once  = gr.Checkbox(value=_params.get("guide_once", True),   label=_t("once_per_session"))
-                dd_lang = gr.Dropdown(choices=["en","de","es","fr","pt","it","pl","cs"],
-                                        value=_params.get("guide_lang", "en"),
-                                        label=_t("guide_lang"))
+                dd_lang  = gr.Dropdown(
+                    choices=["en","de","es","fr","pt","it","pl","cs"],
+                    value=_params.get("guide_lang", "en"),
+                    label=_t("guide_lang")
+                )
             with gr.Row():
                 cb_allow = gr.Checkbox(value=_params.get("allow_model_saves", True),
                                        label=_t("allow_model_save"))
@@ -1113,18 +1192,19 @@ def ui():
                 _params["allow_model_saves"]  = bool(allow)
                 _params["guide_triggers"]     = [w.strip() for w in (trig_txt or "").split(",") if w.strip()]
                 _save()
-                return {
-                    cb_time:     gr.update(label=_t("append_time")),
-                    cb_date:     gr.update(label=_t("append_date")),
-                    cb_dbg:      gr.update(label=_t("debug_logs")),
-                    sl_max:      gr.update(label=_t("max_injected")),
-                    sl_max_show: gr.update(label=_t("max_listed")),
-                    cb_guide:    gr.update(label=_t("inject_guide")),
-                    cb_once:     gr.update(label=_t("once_per_session")),
-                    dd_lang:     gr.update(label=_t("guide_lang")),
-                    cb_allow:    gr.update(label=_t("allow_model_save")),
-                    trigger_tb:  gr.update(label=_t("triggers"), placeholder=_t("triggers_ph")),
-                }
+
+                return (
+                    _U(label=_t("append_time")),       # cb_time
+                    _U(label=_t("append_date")),       # cb_date
+                    _U(label=_t("debug_logs")),        # cb_dbg
+                    _U(label=_t("max_injected")),      # sl_max
+                    _U(label=_t("max_listed")),        # sl_max_show
+                    _U(label=_t("inject_guide")),      # cb_guide
+                    _U(label=_t("once_per_session")),  # cb_once
+                    _U(label=_t("guide_lang")),        # dd_lang
+                    _U(label=_t("allow_model_save")),  # cb_allow
+                    _U(label=_t("triggers"), placeholder=_t("triggers_ph")),  # trigger_tb
+                )
 
             for comp in (dd_ui_lang, cb_time, cb_date, cb_dbg, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb):
                 comp.change(
@@ -1132,10 +1212,17 @@ def ui():
                     [dd_ui_lang, cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb],
                     outputs=[cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb]
                 )
-            sl_max.release(_apply_settings, [dd_ui_lang, cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb],
-                           outputs=[cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb])
-            sl_max_show.release(_apply_settings, [dd_ui_lang, cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb],
-                                outputs=[cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb])
+
+            sl_max.release(
+                _apply_settings,
+                [dd_ui_lang, cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb],
+                outputs=[cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb]
+            )
+            sl_max_show.release(
+                _apply_settings,
+                [dd_ui_lang, cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb],
+                outputs=[cb_time, cb_date, cb_dbg, sl_max, sl_max_show, cb_guide, cb_once, dd_lang, cb_allow, trigger_tb]
+            )
 
             gr.Button(_t("reload_disk")).click(lambda: (_load(), None), outputs=[])
 
